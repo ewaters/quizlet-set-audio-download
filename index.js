@@ -1,24 +1,71 @@
 // ==UserScript==
-// @name         New Userscript
-// @namespace    http://tampermonkey.net/
+// @name         Quizlet Export Audio
 // @version      0.1
-// @description  try to take over the world!
-// @author       You
+// @description  Export an audio file of all terms in a set for listening to
+// @author       Eric Waters
 // @match        https://quizlet.com/*/*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/async/1.5.2/async.min.js
+// @require      https://raw.githubusercontent.com/zhuker/lamejs/master/lame.min.js
 // ==/UserScript==
 /* jshint -W097 */
 /* global AudioContext, setPage, async, $ */
 'use strict';
 
+console.log("Quizlet Export Audio loaded");
+installButton();
+
 var context = new AudioContext();
 
-window.exportMP3 = function () {
+function installButton() {
+    var popout = $('.SetTools-tool.poppable .popout');
+    if (popout.length === 0) {
+        return;
+    }
+    var btn = $('<a class="SetTools-moreTool SetTools-moreTool--audio audio-tool"><span class="glyph icon audio-icon">&#xE096;</span><span class="label">Get Audio</span></a>');
+    popout.append(btn);
+    btn.on("click", generateAudio);
+    console.log("Button installed");
+}
+
+function generateAudio() {
+    console.time("generateAudio");
+    console.time("fetchTermAudio");
     async.mapSeries(setPage.terms.slice(0, 5), fetchTermAudio, fetchComplete);
 }
 
+function fetchTermAudio(term, cb) {
+    term.buffers = {};
+    var forEach = function (type, cb) {
+        fetchAudio(term.getAudioUrl(type), function (err, buffer) {
+            if (err) {
+                return cb(err);
+            }
+            term.buffers[type] = buffer;
+            return cb();
+        });
+    };
+    async.each(["word", "definition"], forEach, function(err) { cb(err, term); });
+}
+
+function fetchAudio (url, cb) {
+    var request = new XMLHttpRequest();
+    request.open('GET', url, true);
+    request.responseType = 'arraybuffer';
+    request.onload = function () {
+        context.decodeAudioData(request.response, function (buffer) {
+            // TODO: Convert the buffer into an Int16Array to make the WAV
+            // conversion faster.
+            cb(null, buffer);
+        }, function () {
+            cb("Audio " + url + " decodeAudioData failed");
+        });
+    };
+    request.send();
+}
+
 function fetchComplete(err, terms) {
+    console.timeEnd("fetchTermAudio");
     if (err) {
         console.error(err);
         return;
@@ -35,7 +82,6 @@ function fetchComplete(err, terms) {
         plan.push({ buf: term.buffers.word });
         plan.push({ silence: 2.0 });
     });
-    console.log(plan);
 
     var totalLength = 0;
     $.each(plan, function(idx, item) {
@@ -47,7 +93,6 @@ function fetchComplete(err, terms) {
             totalLength += item.buf.length;
         }
     });
-    console.log(plan);
 
     var buf = context.createBuffer(1, totalLength, sampleRate);
     var channel = buf.getChannelData(0);
@@ -57,12 +102,17 @@ function fetchComplete(err, terms) {
         }
         channel.set(item.buf.getChannelData(0), item.offset);
     });
+    console.timeEnd("generateAudio");
 
     window.playBuf = function() {
         playBuffer(buf);
     };
     window.downloadWAV = function() {
+        console.time("downloadWav");
+        console.time("audioBufferToWav");
         var wav = audioBufferToWav(buf);
+        console.timeEnd("audioBufferToWav");
+
         var blob = new window.Blob([ new DataView(wav) ], {
             type: 'audio/wav'
         });
@@ -75,21 +125,8 @@ function fetchComplete(err, terms) {
         anchor.download = 'audio.wav';
         anchor.click();
         window.URL.revokeObjectURL(url);
+        console.timeEnd("downloadWav");
     };
-}
-
-function fetchTermAudio(term, cb) {
-    term.buffers = {};
-    var forEach = function (type, cb) {
-        fetchAudio(term.getAudioUrl(type), function (err, buffer) {
-            if (err) {
-                return cb(err);
-            }
-            term.buffers[type] = buffer;
-            return cb();
-        });
-    };
-    async.each(["word", "definition"], forEach, function(err) { cb(err, term); });
 }
 
 function playBuffer (buf) {
@@ -108,20 +145,6 @@ function appendBuffer (buffer1, buffer2) {
         channel.set(buffer2.getChannelData(i), buffer1.length);
     }
     return tmp;
-}
-
-function fetchAudio (url, cb) {
-    var request = new XMLHttpRequest();
-    request.open('GET', url, true);
-    request.responseType = 'arraybuffer';
-    request.onload = function () {
-        context.decodeAudioData(request.response, function (buffer) {
-            cb(null, buffer);
-        }, function () {
-            cb("Audio " + url + " decodeAudioData failed");
-        });
-    };
-    request.send();
 }
 
 /* https://github.com/Jam3/audiobuffer-to-wav/blob/master/index.js */
@@ -219,4 +242,3 @@ function writeString (view, offset, string) {
     }
 }
 
-console.log("Eric was here");
