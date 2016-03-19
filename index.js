@@ -9,7 +9,7 @@
 // @require      https://raw.githubusercontent.com/zhuker/lamejs/master/lame.min.js
 // ==/UserScript==
 /* jshint -W097 */
-/* global AudioContext, setPage, async, $ */
+/* global AudioContext, setPage, async, $, lamejs */
 'use strict';
 
 console.log("Quizlet Export Audio loaded");
@@ -35,13 +35,13 @@ function generateAudio() {
 }
 
 function fetchTermAudio(term, cb) {
-    term.buffers = {};
+    term.audio = {};
     var forEach = function (type, cb) {
-        fetchAudio(term.getAudioUrl(type), function (err, buffer) {
+        fetchAudio(term.getAudioUrl(type), function (err, data) {
             if (err) {
                 return cb(err);
             }
-            term.buffers[type] = buffer;
+            term.audio[type] = data;
             return cb();
         });
     };
@@ -54,9 +54,10 @@ function fetchAudio (url, cb) {
     request.responseType = 'arraybuffer';
     request.onload = function () {
         context.decodeAudioData(request.response, function (buffer) {
-            // TODO: Convert the buffer into an Int16Array to make the WAV
-            // conversion faster.
-            cb(null, buffer);
+            cb(null, {
+				buffer: buffer,
+				int16: audioBufferToInt16(buffer),
+			});
         }, function () {
             cb("Audio " + url + " decodeAudioData failed");
         });
@@ -70,16 +71,16 @@ function fetchComplete(err, terms) {
         console.error(err);
         return;
     }
-    var sampleRate = terms[0].buffers.word.sampleRate;
+    var sampleRate = terms[0].audio.word.buffer.sampleRate;
 
     var plan = [];
     $.each(terms, function(idx, term) {
-        plan.push({ buf: term.buffers.definition });
+        plan.push({ audio: term.audio.definition });
         plan.push({ silence: 1.0 });
         
-        plan.push({ buf: term.buffers.word });
+        plan.push({ audio: term.audio.word });
         plan.push({ silence: 1.5 });
-        plan.push({ buf: term.buffers.word });
+        plan.push({ audio: term.audio.word });
         plan.push({ silence: 2.0 });
     });
 
@@ -88,45 +89,75 @@ function fetchComplete(err, terms) {
         if (item.silence !== undefined) {
             totalLength += Math.floor(item.silence * sampleRate);
         }
-        if (item.buf !== undefined) {
+        if (item.audio !== undefined) {
             plan[idx].offset = totalLength;
-            totalLength += item.buf.length;
+            totalLength += item.audio.buffer.length;
         }
     });
 
+	// Use the plan to generate two items: AudioBuffer and Int16Array.
     var buf = context.createBuffer(1, totalLength, sampleRate);
     var channel = buf.getChannelData(0);
+	var samples = new Int16Array(totalLength);
     $.each(plan, function(idx, item) {
-        if (item.buf === undefined) {
+        if (item.audio === undefined) {
             return;
         }
-        channel.set(item.buf.getChannelData(0), item.offset);
+        channel.set(item.audio.buffer.getChannelData(0), item.offset);
+		samples.set(item.audio.int16, item.offset);
     });
     console.timeEnd("generateAudio");
+
+	var setTitle = $('section.SetHeader .SetTitle-title').text();
+	if (!setTitle) {
+		setTitle = "Set " + window.setPage.setId;
+	}
 
     window.playBuf = function() {
         playBuffer(buf);
     };
     window.downloadWAV = function() {
         console.time("downloadWav");
+
         console.time("audioBufferToWav");
-        var wav = audioBufferToWav(buf);
+        var wav = audioBufferToWav(buf, { int16samples: samples });
         console.timeEnd("audioBufferToWav");
 
-        var blob = new window.Blob([ new DataView(wav) ], {
-            type: 'audio/wav'
-        });
-
-        var url = window.URL.createObjectURL(blob);
-        var anchor = document.createElement('a');
-        document.body.appendChild(anchor);
-        anchor.style = 'display: none';
-        anchor.href = url;
-        anchor.download = 'audio.wav';
-        anchor.click();
-        window.URL.revokeObjectURL(url);
+		downloadBinaryFile(setTitle + ".wav", "audio/wav", [ new DataView(wav) ]);
         console.timeEnd("downloadWav");
     };
+	window.downloadMP3 = function() {
+        console.time("downloadMP3");
+		var lib = new lamejs(),
+			enc = new lib.Mp3Encoder(1, sampleRate, 128),
+			blockSize = 1152,
+			data = [],
+			i, buf;
+		for (i = 0; i < totalLength; i += blockSize) {
+			buf = enc.encodeBuffer(samples.subarray(i, i + blockSize));
+			if (buf.length > 0) {
+				data.push(buf);
+			}
+		}
+		buf = enc.flush();
+		if (buf.length > 0) {
+			data.push(buf);
+		}
+		downloadBinaryFile(setTitle + ".mp3", "audio/mp3", data);
+        console.timeEnd("downloadMP3");
+	};
+}
+
+function downloadBinaryFile (filename, type, data) {
+	var blob = new window.Blob(data, {type: type}),
+		url = window.URL.createObjectURL(blob),
+		anchor = document.createElement('a');
+	document.body.appendChild(anchor);
+	anchor.style = 'display: none';
+	anchor.href = url;
+	anchor.download = filename;
+	anchor.click();
+	window.URL.revokeObjectURL(url);
 }
 
 function playBuffer (buf) {
@@ -148,6 +179,18 @@ function appendBuffer (buffer1, buffer2) {
 }
 
 /* https://github.com/Jam3/audiobuffer-to-wav/blob/master/index.js */
+function audioBufferToInt16 (buffer) {
+    var float32Arr = buffer.getChannelData(0),
+		len = float32Arr.length,
+		result = new Int16Array(len),
+		s, i;
+    for (i = 0; i < len; i++) {
+        s = Math.max(-1, Math.min(1, float32Arr[i]));
+        result[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+	return result;
+}
+
 function audioBufferToWav (buffer, opt) {
     opt = opt || {};
 
@@ -156,17 +199,31 @@ function audioBufferToWav (buffer, opt) {
     var format = opt.float32 ? 3 : 1;
     var bitDepth = format === 3 ? 32 : 16;
 
-    var result;
-    if (numChannels === 2) {
-        result = interleave(buffer.getChannelData(0), buffer.getChannelData(1));
+    var samples;
+	if (opt.int16samples) {
+		samples = opt.int16samples;
+	} else if (numChannels === 2) {
+        samples = interleave(buffer.getChannelData(0), buffer.getChannelData(1));
     } else {
-        result = buffer.getChannelData(0);
+        samples = buffer.getChannelData(0);
     }
 
-    return encodeWAV(result, format, sampleRate, numChannels, bitDepth);
+    var wav = startWAV(samples, format, sampleRate, numChannels, bitDepth);
+	var view;
+	if (opt.int16samples) {
+		view = new Int16Array(wav);
+		view.set(opt.int16samples, 22);
+	} else if (format === 1) { // Raw PCM
+		view = new DataView(wav);
+        floatTo16BitPCM(view, 44, samples);
+    } else {
+		view = new DataView(wav);
+        writeFloat32(view, 44, samples);
+    }
+	return wav;
 }
 
-function encodeWAV (samples, format, sampleRate, numChannels, bitDepth) {
+function startWAV (samples, format, sampleRate, numChannels, bitDepth) {
     var bytesPerSample = bitDepth / 8;
     var blockAlign = numChannels * bytesPerSample;
 
@@ -199,11 +256,6 @@ function encodeWAV (samples, format, sampleRate, numChannels, bitDepth) {
     writeString(view, 36, 'data');
     /* data chunk length */
     view.setUint32(40, samples.length * bytesPerSample, true);
-    if (format === 1) { // Raw PCM
-        floatTo16BitPCM(view, 44, samples);
-    } else {
-        writeFloat32(view, 44, samples);
-    }
 
     return buffer;
 }
