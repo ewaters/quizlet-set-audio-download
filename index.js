@@ -18,21 +18,107 @@ installButton();
 var context = new AudioContext();
 
 function installButton() {
+	if ($ === undefined) {
+		console.log("jQuery not loaded yet; delaying Quizlet Export Audio install");
+		window.setTimeout(installButton, 100);
+	}
+	var modal = installModal();
+
     var popout = $('.SetTools-tool.poppable .popout');
     if (popout.length === 0) {
         return;
     }
     var btn = $('<a class="SetTools-moreTool SetTools-moreTool--audio audio-tool"><span class="glyph icon audio-icon">&#xE096;</span><span class="label">Get Audio</span></a>');
     popout.append(btn);
-    btn.on("click", generateAudio);
+    btn.on("click", function() {
+		QModal.open(modal, {
+			on: { open: modalOpened },
+			includeClose: true,
+		});
+	});
     console.log("Button installed");
 
+}
+
+function installModal() {
+	var modal = $("<div class='GetAudioModal qmodal-preloaded'/>");
+	modal.append('<div class="ListToggleModal-header"><h2 class="ListToggleModal-title">Get Audio</h2></div>');
+	modal.append("<div class='section'/>");
+	$(".SetHeader .container").append(modal);
+	return modal;
+}
+
+function modalOpened() {
+	console.info("Modal opened");
+	var section = $('.GetAudioModal .section');
+	section.css({
+		pading: "15px 40px",
+	});
+	section.empty();
+	var form = $('<form class="qmodal-form"/>');
+	form.append("<label class='field'>" +
+			"<input type='radio' name='terms' value='all' id='terms_all'/> " + 
+			"<label for='terms_all'>All " + setPage.terms.length + " terms</label>" +
+			"</label>");
+	form.append("<label class='field'>" +
+			"<input type='radio' name='terms' value='star' id='terms_star'/> " +
+			"<label for='terms_star'>Only <span class='glyph icon star-icon'>&#xE041;</span> terms (" + getStarredTerms().length + " items)</label>" +
+			"</label>");
+	var btn = $("<button>Build</button>");
+	btn.on("click", function (e) {
+		generateAudio();
+		e.preventDefault();
+	});
+	var field = $("<label class='field'/>");
+	field.append(btn);
+	form.append(field);
+	section.append(form);
+}
+
+function modalProgress(msg) {
+	var section = $('.GetAudioModal .section');
+	section.empty();
+	section.append("<p>" + msg + "</p>");
+}
+
+function getStarredTerms() {
+	var byId = {};
+	$.each(setPage.terms, function(idx, val) {
+		byId[val.id] = val;
+	});
+
+	var terms = [];
+	$("#terms .term.selected").each(function (idx, val) {
+		var id = $(val).data("id");
+		terms.push(byId[id]);
+	});
+	return terms;
 }
 
 function generateAudio() {
     console.time("generateAudio");
     console.time("fetchTermAudio");
-    async.mapLimit(setPage.terms, 5, fetchTermAudio, fetchComplete);
+
+	var terms = [];
+	var subsetTerms = $('.GetAudioModal input[name=terms]:checked').val();
+	if (subsetTerms === "all") {
+		terms = setPage.terms;
+	} else {
+		terms = getStarredTerms();
+	}
+
+	modalProgress("Starting fetch of " + terms.length + " terms");
+	var progressCallback = progressEvery(500, function(percent, secsRemain) {
+		modalProgress("Fetch audio progress: " + Math.floor(percent) + "%");
+	});
+
+	var i = 0;
+    async.mapLimit(terms, 5, 
+		function(term, cb) {
+			i++;
+			progressCallback(i, terms.length);
+			return fetchTermAudio(term, cb);
+		}, fetchComplete);
 }
 
 function fetchTermAudio(term, cb) {
@@ -120,55 +206,50 @@ function fetchComplete(err, terms) {
     window.downloadWAV = function(cb) {
         var wav = audioBufferToWav(buf, { int16samples: samples });
 		downloadBinaryFile(setTitle + ".wav", "audio/wav", [ new DataView(wav) ]);
+		QModal.close();
     };
 	window.downloadMP3 = function(cb) {
         console.time("downloadMP3");
-		console.log(cb);
-		var progressCallback = progressEvery(2000, function(percent, secsRemain) {
+		var progressCallback = progressEvery(500, function(percent, secsRemain) {
 			if (secsRemain === undefined) {
 				secsRemain = "Unknown";
 			} else {
 				secsRemain = secsRemain + " seconds";
 			}
 			var msg = "MP3 encode progress: " + Math.floor(percent) + "%; estimated remaining: " + secsRemain;
-			console.log(msg);
 			if (cb !== undefined) {
 				cb(msg);
+			} else {
+				console.log(msg);
 			}
 		});
-		var data = encodeMP3(samples, sampleRate, progressCallback);
-		downloadBinaryFile(setTitle + ".mp3", "audio/mp3", data);
-        console.timeEnd("downloadMP3");
+		var completeCallback = function(data) {
+			downloadBinaryFile(setTitle + ".mp3", "audio/mp3", data);
+			console.timeEnd("downloadMP3");
+			QModal.close();
+		};
+		encodeMP3Worker(samples, sampleRate, progressCallback, completeCallback);
 	};
 
-	var modal = $("<div class='GetAudioModal qmodal-preloaded'/>");
-	var header = $('<div class="ListToggleModal-header"><h2 class="ListToggleModal-title">Get Audio</h2></div>');
-	modal.append(header);
-	var section = $("<div class='section'/>");
-	modal.append(section);
-	$(".SetHeader .container").append(modal);
-
 	var items = [
-		{ title: "Get WAV file (larger but faster)", id: "downloadWav", action: window.downloadWAV },
-		{ title: "Get MP3 file (smaller but slow)", id: "downloadMP3", action: window.downloadMP3 },
+		{ label: "Get WAV file", desc: "larger but faster", id: "downloadWav", action: window.downloadWAV },
+		{ label: "Get MP3 file", desc: "smaller but slow", id: "downloadMP3", action: window.downloadMP3 },
 	];
-
-	QModal.open(modal, {
-		on: {
-			open: function() {
-				var section = $('.GetAudioModal .section');
-				$.each(items, function(idx, item) {
-					var li = $("<li>" + item.title + "</li>");
-					li.on("click", function (e) {
-						item.action();
-						e.preventDefault();
-					});
-					section.append(li);
-				});
-			},
-		},
-		includeClose: true,
+	var section = $('.GetAudioModal .section');
+	section.empty();
+	var form = $('<form class="qmodal-form"/>');
+	$.each(items, function(idx, item) {
+		var btn = $("<button>" + item.label + "</button>");
+		btn.on("click", function (e) {
+			item.action(modalProgress);
+			e.preventDefault();
+		});
+		var field = $("<label class='field'/>");
+		field.append(btn);
+		field.append("<span>" + item.desc + "</span>");
+		form.append(field);
 	});
+	section.append(form);
 }
 
 function progressEvery (interval, cb) {
@@ -209,6 +290,67 @@ function encodeMP3 (samples, sampleRate, progressCallback) {
 		data.push(buf);
 	}
 	return data;
+}
+
+function fetchLameLib(cb) {
+    var req = new XMLHttpRequest();
+    req.open('GET', 'https://raw.githubusercontent.com/zhuker/lamejs/master/lame.min.js');
+	req.addEventListener("load", function() {
+		cb(null, this.responseText);
+	});
+	req.send();
+}
+
+function encodeMP3Worker (samples, sampleRate, progressCallback, completeCallback) {
+	fetchLameLib(function(err, js) {
+		if (err) {
+			console.error(err);
+			return;
+		}
+
+		js += `
+		self.addEventListener("message", function(e) {
+			var lib = new lamejs(),
+				enc = new lib.Mp3Encoder(1, e.data.sampleRate, 128),
+				blockSize = 1152,
+				data = [],
+				samples = e.data.samples,
+				len = samples.length,
+				i, buf;
+			for (i = 0; i < len; i += blockSize) {
+				self.postMessage({ progress: [i, len] });
+				buf = enc.encodeBuffer(samples.subarray(i, i + blockSize));
+				if (buf.length > 0) {
+					data.push(buf);
+				}
+			}
+			buf = enc.flush();
+			if (buf.length > 0) {
+				data.push(buf);
+			}
+			self.postMessage({ complete: data });
+			self.close();
+		}, false);
+		`;
+
+		var msg = {
+			samples: samples,
+			sampleRate: sampleRate,
+		};
+		var xfer = [ samples.buffer ];
+
+		var blob = new Blob([js]),
+			url = window.URL.createObjectURL(blob),
+			worker = new Worker(url);
+		worker.addEventListener('message', function(e) {
+			if (e.data.progress) {
+				progressCallback(e.data.progress[0], e.data.progress[1]);
+			} else if (e.data.complete) {
+				completeCallback(e.data.complete);
+			}
+		}, false);
+		worker.postMessage(msg, xfer);
+	});
 }
 
 function downloadBinaryFile (filename, type, data) {
