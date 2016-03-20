@@ -9,7 +9,7 @@
 // @require      https://raw.githubusercontent.com/zhuker/lamejs/master/lame.min.js
 // ==/UserScript==
 /* jshint -W097 */
-/* global AudioContext, setPage, async, $, lamejs */
+/* global AudioContext, setPage, async, $, lamejs, QModal */
 'use strict';
 
 console.log("Quizlet Export Audio loaded");
@@ -26,12 +26,13 @@ function installButton() {
     popout.append(btn);
     btn.on("click", generateAudio);
     console.log("Button installed");
+
 }
 
 function generateAudio() {
     console.time("generateAudio");
     console.time("fetchTermAudio");
-    async.mapSeries(setPage.terms.slice(0, 5), fetchTermAudio, fetchComplete);
+    async.mapLimit(setPage.terms, 5, fetchTermAudio, fetchComplete);
 }
 
 function fetchTermAudio(term, cb) {
@@ -116,36 +117,98 @@ function fetchComplete(err, terms) {
     window.playBuf = function() {
         playBuffer(buf);
     };
-    window.downloadWAV = function() {
-        console.time("downloadWav");
-
-        console.time("audioBufferToWav");
+    window.downloadWAV = function(cb) {
         var wav = audioBufferToWav(buf, { int16samples: samples });
-        console.timeEnd("audioBufferToWav");
-
 		downloadBinaryFile(setTitle + ".wav", "audio/wav", [ new DataView(wav) ]);
-        console.timeEnd("downloadWav");
     };
-	window.downloadMP3 = function() {
+	window.downloadMP3 = function(cb) {
         console.time("downloadMP3");
-		var lib = new lamejs(),
-			enc = new lib.Mp3Encoder(1, sampleRate, 128),
-			blockSize = 1152,
-			data = [],
-			i, buf;
-		for (i = 0; i < totalLength; i += blockSize) {
-			buf = enc.encodeBuffer(samples.subarray(i, i + blockSize));
-			if (buf.length > 0) {
-				data.push(buf);
+		console.log(cb);
+		var progressCallback = progressEvery(2000, function(percent, secsRemain) {
+			if (secsRemain === undefined) {
+				secsRemain = "Unknown";
+			} else {
+				secsRemain = secsRemain + " seconds";
 			}
-		}
-		buf = enc.flush();
-		if (buf.length > 0) {
-			data.push(buf);
-		}
+			var msg = "MP3 encode progress: " + Math.floor(percent) + "%; estimated remaining: " + secsRemain;
+			console.log(msg);
+			if (cb !== undefined) {
+				cb(msg);
+			}
+		});
+		var data = encodeMP3(samples, sampleRate, progressCallback);
 		downloadBinaryFile(setTitle + ".mp3", "audio/mp3", data);
         console.timeEnd("downloadMP3");
 	};
+
+	var modal = $("<div class='GetAudioModal qmodal-preloaded'/>");
+	var header = $('<div class="ListToggleModal-header"><h2 class="ListToggleModal-title">Get Audio</h2></div>');
+	modal.append(header);
+	var section = $("<div class='section'/>");
+	modal.append(section);
+	$(".SetHeader .container").append(modal);
+
+	var items = [
+		{ title: "Get WAV file (larger but faster)", id: "downloadWav", action: window.downloadWAV },
+		{ title: "Get MP3 file (smaller but slow)", id: "downloadMP3", action: window.downloadMP3 },
+	];
+
+	QModal.open(modal, {
+		on: {
+			open: function() {
+				var section = $('.GetAudioModal .section');
+				$.each(items, function(idx, item) {
+					var li = $("<li>" + item.title + "</li>");
+					li.on("click", function (e) {
+						item.action();
+						e.preventDefault();
+					});
+					section.append(li);
+				});
+			},
+		},
+		includeClose: true,
+	});
+}
+
+function progressEvery (interval, cb) {
+	var start = Date.now(),
+		lastTime = start;
+	return function(cur, max) {
+		var ratio = Math.max(0, Math.min(1, cur/max)),
+			now = Date.now(),
+			elapsed = now - start,
+			sinceLast = now - lastTime;
+		if (sinceLast > interval) {
+			var secsRemain;
+			if (cur > 1) {
+				secsRemain = Math.floor(((elapsed / ratio) - elapsed) / 1000);
+			}
+			cb(100 * ratio, secsRemain);
+			lastTime = now;
+		}
+	};
+}
+
+function encodeMP3 (samples, sampleRate, progressCallback) {
+	var lib = new lamejs(),
+		enc = new lib.Mp3Encoder(1, sampleRate, 128),
+		blockSize = 1152,
+		data = [],
+		len = samples.length,
+		i, buf;
+	for (i = 0; i < len; i += blockSize) {
+		progressCallback(i, len);
+		buf = enc.encodeBuffer(samples.subarray(i, i + blockSize));
+		if (buf.length > 0) {
+			data.push(buf);
+		}
+	}
+	buf = enc.flush();
+	if (buf.length > 0) {
+		data.push(buf);
+	}
+	return data;
 }
 
 function downloadBinaryFile (filename, type, data) {
